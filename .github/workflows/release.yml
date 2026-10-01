@@ -91,7 +91,7 @@ jobs:
       - name: bootstrap ARM64 Dart SDK
         shell: pwsh
         run: |
-          $sdk = (flutter --version --machine | ConvertFrom-Json).flutterRoot
+          $sdk = $env:FLUTTER_ROOT
           Remove-Item "$sdk\bin\cache\engine-dart-sdk.stamp" -ErrorAction SilentlyContinue
           & "$sdk\bin\internal\update_dart_sdk.ps1"
       - name: verify ARM64 Dart SDK
@@ -104,8 +104,7 @@ jobs:
       - name: verify ARM64 engine artifacts
         shell: pwsh
         run: |
-          $sdk = (flutter --version --machine | ConvertFrom-Json).flutterRoot
-          $dir = Join-Path $sdk "bin\cache\artifacts\engine\windows-arm64-release"
+          $dir = Join-Path $env:FLUTTER_ROOT "bin\cache\artifacts\engine\windows-arm64-release"
           if (-not (Test-Path $dir)) { throw "missing ARM64 engine artifacts: $dir" }
       - run: flutter pub get
       # 3.24.5 cannot target ARM64 with a native toolchain; 3.44+ ships

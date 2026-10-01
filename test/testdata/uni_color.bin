@@ -1,0 +1,26 @@
+echo shell-probe-hello
+[32mDarsh@fedora[39m:[32m~/still[39m$ echo shell-probe-hello
+shell-probe-hello
+[32mDarsh@fedora[39m:[32m~/still[39m$ echo MARKER123
+MARKER123
+[32mDarsh@fedora[39m:[32m~/still[39m$ sleep 60 & echo BG_PID:$!
+[1] 380777
+BG_PID:380777
+[32mDarsh@fedora[39m:[32m~/still[39m$ jobs; echo REATTACH_OK
+[1]+  Running                    sleep 60 &
+REATTACH_OK
+[32mDarsh@fedora[39m:[32m~/still[39m$ sleep 30
+^C
+[32mDarsh@fedora[39m:[32m~/still[39m$ TERM=xterm-256color less /etc/hosts
+[32mDarsh@fedora[39m:[32m~/still[39m$ TERM=xterm-256color less /etc/hosts
+[32mDarsh@fedora[39m:[32m~/still[39m$ TERM=xterm-256color less /etc/hosts
+[1]+  Done                       sleep 60
+[32mDarsh@fedora[39m:[32m~/still[39m$ TERM=xterm-256color less /etc/hosts
+[32mDarsh@fedora[39m:[32m~/still[39m$ TERM=xterm-256color htop
+[32mDarsh@fedora[39m:[32m~/still[39m$ printf 'UNI \xE2\x9C\x93 \xE4\xBD\xA0\xE5\xA5\xBD \xF0\x9F
+\x98\x80\n'
+UNI ✓ 你好 😀
+[32mDarsh@fedora[39m:[32m~/still[39m$ printf '\033[38;2;255;100;0mTRUE\033[0m \033[1;34mBOLD-BLU
+E\033[0m \033[38;5;208m256-ORANGE\033[0m\n'
+[38;2;255;100;0mTRUE[39m [1m[34mBOLD-BLUE[0m [38;5;208m256-ORANGE[39m
+[32mDarsh@fedora[39m:[32m~/still[39m$

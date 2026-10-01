@@ -80,11 +80,34 @@ jobs:
     needs: check
     steps:
       - uses: actions/checkout@v4
+      # No Windows ARM64 Flutter SDK archive exists for 3.44.9, so install
+      # the x64 SDK explicitly, then force the Dart SDK bootstrap to ARM64.
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: ${{ env.FLUTTER_VERSION_ARM64 }}
           channel: stable
+          architecture: x64
           cache: true
+      - name: bootstrap ARM64 Dart SDK
+        shell: pwsh
+        run: |
+          $sdk = (flutter --version --machine | ConvertFrom-Json).flutterRoot
+          Remove-Item "$sdk\bin\cache\engine-dart-sdk.stamp" -ErrorAction SilentlyContinue
+          & "$sdk\bin\internal\update_dart_sdk.ps1"
+      - name: verify ARM64 Dart SDK
+        shell: pwsh
+        run: |
+          dart --version
+          $out = dart --version 2>&1 | Out-String
+          if ($out -notmatch "windows_arm64") { throw "Dart SDK is not windows_arm64: $out" }
+      - run: flutter precache --windows
+      - name: verify ARM64 engine artifacts
+        shell: pwsh
+        run: |
+          $sdk = (flutter --version --machine | ConvertFrom-Json).flutterRoot
+          $dir = Join-Path $sdk "bin\cache\artifacts\engine\windows-arm64-release"
+          if (-not (Test-Path $dir)) { throw "missing ARM64 engine artifacts: $dir" }
+      - run: flutter pub get
       # 3.24.5 cannot target ARM64 with a native toolchain; 3.44+ ships
       # the native Windows ARM64 Dart SDK/engine. On this ARM64 host,
       # Flutter targets windows-arm64 natively:

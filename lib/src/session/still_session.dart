@@ -4,6 +4,20 @@ import '../config/ssh_config.dart';
 /// shows); says nothing about transport. Not a tmux concept.
 enum SessionKind { shell, agent, editor, git, monitor, logs }
 
+/// Command a new remote session runs at creation for each [SessionKind].
+/// Null means the default shell. These are fixed allowlisted strings —
+/// never user input — passed as tmux new-session's creation command, so
+/// they apply only when the persistent session is created; reattaching
+/// never re-runs them.
+String? startCommandFor(SessionKind kind) => switch (kind) {
+      SessionKind.shell => null,
+      SessionKind.agent => 'claude',
+      SessionKind.editor => 'nvim',
+      SessionKind.git => 'lazygit',
+      SessionKind.monitor => 'btop',
+      SessionKind.logs => 'tail -f',
+    };
+
 /// Remote session existence. `detached` = previously connected, remote
 /// keeps running (tmux), resumable. `unknown` = never connected here.
 enum SessionState { running, detached, unknown }

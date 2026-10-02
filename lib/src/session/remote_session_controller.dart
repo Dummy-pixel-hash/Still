@@ -90,9 +90,16 @@ class RemoteSessionController {
         }
       }));
 
-      // Enter (or create) the persistent tmux session.
+      // Enter (or create) the persistent tmux session. The start
+      // directory and creation command apply only when tmux creates the
+      // session; reattaching to an existing one ignores them.
       channel.write(Uint8List.fromList(utf8.encode(
-        _tmux!.attachCommand(cols: config.cols, rows: config.rows),
+        _tmux!.attachCommand(
+          cols: config.cols,
+          rows: config.rows,
+          startDirectory: config.workdir,
+          startCommand: config.startCommand,
+        ),
       )));
 
       _emit(RemoteSessionStatus.live);

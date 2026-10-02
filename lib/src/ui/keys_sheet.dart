@@ -3,20 +3,16 @@ import 'package:flutter/material.dart';
 import '../session/session_manager.dart';
 import '../session/ssh_key_store.dart';
 import '../theme/still_theme.dart';
+import 'still_controls.dart';
 
 /// Local SSH key management. Names live in prefs, key material only in
 /// secure storage. PEM contents are never displayed — only names.
 /// No cloud sync.
 Future<void> showKeysSheet(
     BuildContext context, SessionManager manager) {
-  return showModalBottomSheet(
-    context: context,
-    backgroundColor: StillTheme.cardBottom,
-    shape: const RoundedRectangleBorder(
-      borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-    ),
-    isScrollControlled: true,
-    builder: (context) => _KeysSheet(keys: manager.keys),
+  return showStillSheet(
+    context,
+    (context) => _KeysSheet(keys: manager.keys),
   );
 }
 

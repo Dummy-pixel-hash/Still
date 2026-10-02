@@ -14,6 +14,8 @@ class SshConfig {
     this.password,
     this.privateKeyPem,
     this.privateKeyPassphrase,
+    this.workdir = '',
+    this.startCommand = '',
     this.tmuxSession = 'still',
     this.termType = 'xterm-256color',
     this.cols = 80,
@@ -28,13 +30,26 @@ class SshConfig {
   final String? password;
   final String? privateKeyPem;
   final String? privateKeyPassphrase;
+
+  /// Working directory for a newly created remote session. Empty or `~`
+  /// means the login default (home). Threaded into the tmux attach
+  /// command; never interpreted locally.
+  final String workdir;
+
+  /// Command the new remote session runs at creation (fixed allowlisted
+  /// value from [startCommandFor], never user input). Empty means the
+  /// default shell. Applies at creation only — reattach never re-runs it.
+  final String startCommand;
+
   final String tmuxSession;
   final String termType;
   final int cols;
   final int rows;
 
-  /// Spike default: accept any host key (with on-screen warning).
-  /// Production must switch to known_hosts persistence (see README).
+  /// Accepts any host key (disclosed on-screen in the New Session form
+  /// and the terminal overlay). Production must switch to known_hosts
+  /// persistence (see README). No verification is performed — nothing
+  /// here should ever claim otherwise.
   final bool acceptAnyHostKey;
 
   bool get isValid =>
@@ -54,6 +69,8 @@ class SshConfig {
     String? password,
     String? privateKeyPem,
     String? privateKeyPassphrase,
+    String? workdir,
+    String? startCommand,
     String? tmuxSession,
     String? termType,
     int? cols,
@@ -68,6 +85,8 @@ class SshConfig {
       password: password ?? this.password,
       privateKeyPem: privateKeyPem ?? this.privateKeyPem,
       privateKeyPassphrase: privateKeyPassphrase ?? this.privateKeyPassphrase,
+      workdir: workdir ?? this.workdir,
+      startCommand: startCommand ?? this.startCommand,
       tmuxSession: tmuxSession ?? this.tmuxSession,
       termType: termType ?? this.termType,
       cols: cols ?? this.cols,

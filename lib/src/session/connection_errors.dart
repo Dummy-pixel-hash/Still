@@ -1,3 +1,5 @@
+import '../config/ssh_config.dart';
+
 /// Human-readable connection failures for the terminal overlay.
 ///
 /// Raw exceptions (SocketException text, SSH handshake dumps) are
@@ -36,5 +38,29 @@ String friendlyConnectionError(Object error) {
   if (raw.contains('stateerror') && raw.contains('no previous connection')) {
     return 'Nothing to reattach to yet. Connect first.';
   }
+  if (raw.contains('missing authentication') ||
+      raw.contains('no identities') ||
+      raw.contains('empty private key') ||
+      raw.contains('private key material is empty')) {
+    return 'Add your password or private key to connect.';
+  }
   return 'Couldn\u2019t connect. Check the details and try again.';
 }
+
+/// Copy used when no usable secret is available yet. This is not an
+/// error — it tells the user where authentication happens. Kept next to
+/// [friendlyConnectionError] so both stay in sync.
+String authMissingMessage(SshAuthKind authKind) {
+  switch (authKind) {
+    case SshAuthKind.password:
+      return 'Enter your password to connect.';
+    case SshAuthKind.privateKey:
+      return 'Paste your private key or pick a saved key to connect.';
+  }
+}
+
+/// Copy used when a session's own details are incomplete (empty host or
+/// username, out-of-range port, key auth with no key). Shown instead of
+/// dialing a connection that cannot succeed.
+String invalidSessionConfigMessage() =>
+    'This session is missing something it needs — check the host, username, port, and key.';

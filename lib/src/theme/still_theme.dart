@@ -16,8 +16,16 @@ abstract class StillTheme {
 
   // Red ambient.
   static const red = Color(0xFFFF4A4A);
+  static const redBright = Color(0xFFFF5A5A);
   static const redDeep = Color(0xFFB3161C);
   static const redSoft = Color(0xFFFF6A6A);
+
+  /// Prototype primary-action gradient.
+  static LinearGradient get redGradient => const LinearGradient(
+        begin: Alignment.topCenter,
+        end: Alignment.bottomCenter,
+        colors: [redBright, redDeep],
+      );
 
   // Text.
   static const fg = Color(0xFFE2DCE5);
@@ -140,6 +148,43 @@ abstract class StillTheme {
         cursorColor: redSoft,
         selectionColor: Color(0x66FF4A4A),
         selectionHandleColor: redSoft,
+      ),
+      // Still surfaces for framework chrome: dialogs, menus, toggles.
+      // Individual product controls keep their own explicit styling.
+      dialogTheme: const DialogTheme(
+        backgroundColor: cardBottom,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.all(Radius.circular(cardRadius)),
+        ),
+      ),
+      popupMenuTheme: PopupMenuThemeData(
+        color: chrome,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+          side: BorderSide(color: Colors.white.withAlpha(20)),
+        ),
+        textStyle: sans.copyWith(fontSize: 13),
+      ),
+      checkboxTheme: CheckboxThemeData(
+        fillColor: WidgetStateProperty.resolveWith((states) =>
+            states.contains(WidgetState.selected) ? redDeep : null),
+        side: BorderSide(color: Colors.white.withAlpha(60)),
+        shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(4)),
+      ),
+      switchTheme: SwitchThemeData(
+        thumbColor: WidgetStateProperty.resolveWith((states) =>
+            states.contains(WidgetState.selected) ? redSoft : dim),
+        trackColor: WidgetStateProperty.resolveWith((states) =>
+            states.contains(WidgetState.selected)
+                ? redDeep.withAlpha(120)
+                : Colors.white.withAlpha(20)),
+      ),
+      sliderTheme: const SliderThemeData(
+        activeTrackColor: redDeep,
+        inactiveTrackColor: Color(0x33FFFFFF),
+        thumbColor: redSoft,
+        overlayColor: Color(0x22FF4A4A),
       ),
     );
   }

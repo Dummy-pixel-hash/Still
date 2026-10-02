@@ -127,7 +127,7 @@ void main() {
       manager.dispose();
     });
 
-    test('removed key falls back to asking (empty secret, no crash)',
+    test('removed key refuses to dial: explicit error, no broken attempt',
         () async {
       SharedPreferences.setMockInitialValues({});
       final creds = MemoryCredentialStore();
@@ -145,11 +145,13 @@ void main() {
         keyId: key.id,
       );
       await manager.keys.remove(key.id);
-      await manager.connect(s);
+      // No PEM anywhere: the manager reports a missing-details error
+      // instead of handing an empty secret to the transport.
+      await expectLater(() => manager.connect(s), throwsStateError);
       await _flush();
-      // No PEM anywhere: empty secret handed to transport (prompts fail
-      // loudly at the SSH layer, UI shows the friendly error path).
-      expect(factory.seen.single.privateKeyPem ?? '', isEmpty);
+      expect(factory.seen, isEmpty);
+      expect(manager.errorOf(s.id), isNotNull);
+      expect(manager.connectionOf(s.id), TransportState.error);
       manager.dispose();
     });
   });

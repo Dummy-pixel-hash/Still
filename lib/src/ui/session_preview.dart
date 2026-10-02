@@ -143,6 +143,9 @@ class SessionPreview extends StatelessWidget {
           ],
         );
       case SessionKind.shell:
+        // The prompt line below is real session data (machine + workdir);
+        // the transcript above it is static set dressing, as in the
+        // prototype's TerminalPreview.
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -157,6 +160,11 @@ class SessionPreview extends StatelessWidget {
                 style:
                     StillTheme.mono.copyWith(fontSize: 10, height: 1.65)),
             const SizedBox(height: 8),
+            Text('${session.machine}  ${session.workdir}',
+                maxLines: 1,
+                overflow: TextOverflow.clip,
+                style: StillTheme.mono.copyWith(
+                    fontSize: 10, height: 1.65, color: const Color(0xFF8E8993))),
             Text('❯ ▍',
                 style: StillTheme.mono.copyWith(
                     fontSize: 10, height: 1.65, color: const Color(0xFFBCB5C5))),

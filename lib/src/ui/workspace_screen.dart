@@ -7,10 +7,14 @@ import '../theme/still_theme.dart';
 import 'new_session_sheet.dart';
 import 'session_card.dart';
 import 'settings_sheet.dart';
+import 'still_controls.dart';
 
 /// The primary home. No sidebar, no nav rail: sessions are the navigation.
 /// Sessions group lightly by project; the model stays Workspace ->
 /// Session -> persistent remote runtime.
+///
+/// [onOpen] carries the tapped card's global rect so the app can grow the
+/// terminal out of the card instead of swapping screens.
 class WorkspaceScreen extends StatefulWidget {
   const WorkspaceScreen({
     super.key,
@@ -19,16 +23,31 @@ class WorkspaceScreen extends StatefulWidget {
   });
 
   final SessionManager manager;
-  final void Function(StillSession session) onOpen;
+  final void Function(StillSession session, Rect origin) onOpen;
 
   @override
-  State<WorkspaceScreen> createState() => _WorkspaceScreenState();
+  State<WorkspaceScreen> createState() => WorkspaceScreenState();
 }
 
-class _WorkspaceScreenState extends State<WorkspaceScreen> {
+/// State is public so the app shell can focus the search field from the
+/// global Ctrl+K handler (which must work even when nothing is focused).
+class WorkspaceScreenState extends State<WorkspaceScreen> {
   String _query = '';
   SessionSort _sort = SessionSort.manual;
   late final Listenable _repaint;
+
+  /// Latest card-reported morph origin. Cards report their rect on tap /
+  /// overflow / secondary-click, synchronously before [_openCard] runs,
+  /// so the app always grows the terminal out of the touched card.
+  Rect? _pendingOrigin;
+  final _searchFocus = FocusNode();
+  bool _searchFocused = false;
+
+  static const _sortLabels = {
+    SessionSort.manual: 'Manual order',
+    SessionSort.recent: 'Recently active',
+    SessionSort.name: 'Name A–Z',
+  };
 
   @override
   void initState() {
@@ -37,6 +56,32 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
     // resubscribe the AnimatedBuilder each frame.
     _repaint =
         Listenable.merge([widget.manager, widget.manager.keys]);
+    _searchFocus.addListener(() {
+      if (mounted) setState(() => _searchFocused = _searchFocus.hasFocus);
+    });
+  }
+
+  @override
+  void dispose() {
+    _searchFocus.dispose();
+    super.dispose();
+  }
+
+  /// Open a card into the terminal, growing out of the card's last
+  /// reported rect (or a centered fallback when none was reported).
+  void _openCard(StillSession s) {
+    final origin = _pendingOrigin ?? _fallbackRect();
+    _pendingOrigin = null;
+    widget.onOpen(s, origin);
+  }
+
+  Rect _fallbackRect() {
+    final size = MediaQuery.sizeOf(context);
+    return Rect.fromCenter(
+      center: size.center(Offset.zero),
+      width: 320,
+      height: 286,
+    );
   }
 
   @override
@@ -53,45 +98,73 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
           body: Stack(
             children: [
               ...StillTheme.ambientGlows(MediaQuery.sizeOf(context)),
-              SafeArea(
-                child: Column(
-                  children: [
-                    _header(context),
-                    Expanded(
-                      child: SingleChildScrollView(
-                        padding: _pagePadding(context),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            _titleRow(
-                                widget.manager.sessions.length),
-                            const SizedBox(height: 20),
-                            _controls(context),
-                            const SizedBox(height: 24),
-                            if (visible.isEmpty)
-                              _emptyState(searching)
-                            else if (_singleUngrouped(groups))
-                              _grid(groups.single.sessions)
-                            else
-                              for (final g in groups) ...[
-                                _groupHeader(g),
-                                _grid(g.sessions),
-                                const SizedBox(height: 24),
-                              ],
-                            const SizedBox(height: 24),
+                // Top vignette: the backdrop falls off into black, as in
+                // the prototype's radial overlay.
+                const Positioned.fill(
+                  child: IgnorePointer(
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        gradient: RadialGradient(
+                          center: Alignment(0, -1.4),
+                          radius: 1.1,
+                          colors: [
+                            Colors.transparent,
+                            Color(0x59050505),
                           ],
+                          stops: [0.3, 0.95],
                         ),
                       ),
                     ),
-                    _footer(),
-                  ],
+                  ),
                 ),
-              ),
-            ],
-          ),
-        );
+                SafeArea(
+                  child: Column(
+                    children: [
+                      _header(context),
+                      Expanded(
+                        child: SingleChildScrollView(
+                          padding: _pagePadding(context),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              _titleRow(
+                                  widget.manager.sessions.length),
+                              const SizedBox(height: 20),
+                              _controls(context),
+                              const SizedBox(height: 24),
+                              if (visible.isEmpty)
+                                _emptyState(searching)
+                              else if (_singleUngrouped(groups))
+                                _grid(groups.single.sessions)
+                              else
+                                for (final g in groups) ...[
+                                  _groupHeader(g),
+                                  _grid(g.sessions),
+                                  const SizedBox(height: 24),
+                                ],
+                              const SizedBox(height: 24),
+                            ],
+                          ),
+                        ),
+                      ),
+                      _footer(),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          );
       },
     );
+  }
+
+  /// Prototype Ctrl+K: focus the search field. Called from the app-level
+  /// hardware key handler so it works even when nothing is focused.
+  /// Workspace-only — while a terminal is open the terminal owns the
+  /// keyboard.
+  void focusSearch() {
+    if (!mounted || widget.manager.selected != null) return;
+    _searchFocus.requestFocus();
   }
 
   EdgeInsets _pagePadding(BuildContext context) {
@@ -186,6 +259,7 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
   }
 
   Widget _controls(BuildContext context) {
+    final wide = MediaQuery.sizeOf(context).width >= 600;
     return Wrap(
       spacing: 8,
       runSpacing: 8,
@@ -193,56 +267,92 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
       children: [
         SizedBox(
           width: 220,
-          child: TextField(
-            onChanged: (v) => setState(() => _query = v),
-            style: StillTheme.sans.copyWith(fontSize: 12),
-            decoration: InputDecoration(
-              hintText: 'Find a session',
-              hintStyle: const TextStyle(
-                  fontSize: 12, color: StillTheme.dim),
-              prefixIcon: const Icon(Icons.search,
-                  size: 14, color: StillTheme.faint),
-              filled: true,
-              fillColor: Colors.white.withAlpha(10),
-              contentPadding:
-                  const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(24),
-                borderSide: BorderSide.none,
+          child: Container(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(24),
+              color: Colors.white.withAlpha(10),
+              border: Border.all(
+                color: _searchFocused
+                    ? StillTheme.redSoft.withAlpha(102)
+                    : Colors.white.withAlpha(15),
+              ),
+            ),
+            child: TextField(
+              key: const ValueKey('workspace-search'),
+              focusNode: _searchFocus,
+              onChanged: (v) => setState(() => _query = v),
+              style: StillTheme.sans.copyWith(fontSize: 12),
+              decoration: InputDecoration(
+                hintText: 'Find a session',
+                hintStyle: const TextStyle(
+                    fontSize: 12, color: StillTheme.dim),
+                prefixIcon: const Icon(Icons.search,
+                    size: 14, color: StillTheme.faint),
+                suffixIcon: wide
+                    ? const Padding(
+                        padding: EdgeInsets.only(right: 12),
+                        child: Kbd('Ctrl K'),
+                      )
+                    : null,
+                suffixIconConstraints:
+                    const BoxConstraints(minHeight: 0, minWidth: 0),
+                filled: true,
+                fillColor: Colors.transparent,
+                contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 16, vertical: 10),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(24),
+                  borderSide: BorderSide.none,
+                ),
               ),
             ),
           ),
         ),
-        DropdownButton<SessionSort>(
-          value: _sort,
-          dropdownColor: StillTheme.chrome,
-          style: StillTheme.sans.copyWith(fontSize: 12, color: StillTheme.dim),
-          underline: const SizedBox.shrink(),
-          items: const [
-            DropdownMenuItem(
-                value: SessionSort.manual, child: Text('Manual order')),
-            DropdownMenuItem(
-                value: SessionSort.recent, child: Text('Recently active')),
-            DropdownMenuItem(
-                value: SessionSort.name, child: Text('Name A–Z')),
+        PopupMenuButton<SessionSort>(
+          tooltip: 'Sort sessions',
+          initialValue: _sort,
+          onSelected: (v) => setState(() => _sort = v),
+          itemBuilder: (context) => [
+            for (final entry in _sortLabels.entries)
+              PopupMenuItem(
+                value: entry.key,
+                child: Row(
+                  children: [
+                    Expanded(child: Text(entry.value)),
+                    if (entry.key == _sort)
+                      const Icon(Icons.check,
+                          size: 14, color: StillTheme.redSoft),
+                  ],
+                ),
+              ),
           ],
-          onChanged: (v) =>
-              setState(() => _sort = v ?? SessionSort.manual),
+          child: Container(
+            padding:
+                const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(24),
+              color: Colors.white.withAlpha(10),
+              border:
+                  Border.all(color: Colors.white.withAlpha(15)),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(_sortLabels[_sort]!,
+                    style: StillTheme.sans
+                        .copyWith(fontSize: 12, color: StillTheme.dim)),
+                const SizedBox(width: 6),
+                const Icon(Icons.expand_more,
+                    size: 14, color: StillTheme.faint),
+              ],
+            ),
+          ),
         ),
         const SizedBox(width: 4),
-        ElevatedButton(
-          onPressed: () => showNewSessionSheet(context, widget.manager),
-          style: ElevatedButton.styleFrom(
-            backgroundColor: StillTheme.redDeep,
-            foregroundColor: Colors.white,
-            padding:
-                const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
-            shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(24)),
-            elevation: 8,
-            shadowColor: StillTheme.red.withAlpha(120),
-          ),
-          child: const Text('New session', style: TextStyle(fontSize: 12)),
+        RedButton(
+          label: 'New session',
+          onPressed: () =>
+              showNewSessionSheet(context, widget.manager),
         ),
       ],
     );
@@ -254,10 +364,17 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
       groups.length == 1 && groups.single.title == ungroupedTitle;
 
   Widget _groupHeader(SessionGroup group) {
+    // The ungrouped bucket shares the serif "Sessions" title above, but it
+    // still gets the same `+` affordance when shown alongside named
+    // projects — without a project prefill.
+    final named = group.title != ungroupedTitle;
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: Row(
         children: [
+          const Icon(Icons.folder_outlined,
+              size: 13, color: StillTheme.faint),
+          const SizedBox(width: 8),
           Text(group.title,
               style: StillTheme.sans.copyWith(
                   fontSize: 12,
@@ -271,6 +388,20 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
           Expanded(
               child: Container(
                   height: 1, color: Colors.white.withAlpha(15))),
+          const SizedBox(width: 4),
+          IconButton(
+            key: ValueKey('project-add-${group.title}'),
+            tooltip: named
+                ? 'New session in ${group.title}'
+                : 'New session',
+            icon: const Icon(Icons.add,
+                size: 18, color: StillTheme.dim),
+            onPressed: () => showNewSessionSheet(
+              context,
+              widget.manager,
+              initialProject: named ? group.title : '',
+            ),
+          ),
         ],
       ),
     );
@@ -291,12 +422,18 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
       itemCount: sessions.length,
       itemBuilder: (context, i) {
         final s = sessions[i];
-        return SessionCard(
-          key: ValueKey(s.id),
-          session: s,
-          manager: widget.manager,
-          onOpen: () => widget.onOpen(s),
-          onLongPress: () => _cardActions(s),
+        return RiseIn(
+          key: ValueKey('rise-${s.id}'),
+          index: i,
+          child: SessionCard(
+            key: ValueKey(s.id),
+            session: s,
+            manager: widget.manager,
+            onOpen: () => _openCard(s),
+            onLongPress: () => _cardActions(s),
+            onActions: () => _cardActions(s),
+            onOrigin: (rect) => _pendingOrigin = rect,
+          ),
         );
       },
     );
@@ -348,6 +485,18 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
                     : 'Create one to keep a terminal that never sleeps.',
                 style: StillTheme.sans
                     .copyWith(fontSize: 12, color: StillTheme.faint)),
+            // Discoverable entry point to the same New Session flow as the
+            // controls above — no redesign, just the action where the
+            // empty state already points at it.
+            if (!searching) ...[
+              const SizedBox(height: 20),
+              RedButton(
+                key: const ValueKey('empty-state-new-session'),
+                label: 'New Session',
+                onPressed: () =>
+                    showNewSessionSheet(context, widget.manager),
+              ),
+            ],
           ],
         ),
       ),
@@ -357,6 +506,7 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
   Widget _footer() {
     final running = widget.manager.runningCount;
     final total = widget.manager.sessions.length;
+    final wide = MediaQuery.sizeOf(context).width >= 600;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
       decoration: const BoxDecoration(
@@ -375,23 +525,26 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
               style:
                   StillTheme.sans.copyWith(fontSize: 10, color: StillTheme.dim)),
           const Spacer(),
-          const Text('Ctrl .  back to workspace',
+          // Desktop hint only; touch layouts get the plain label.
+          if (wide) ...[
+            const Kbd('Ctrl .'),
+            const SizedBox(width: 8),
+          ],
+          const Text('back to workspace',
               style: TextStyle(fontSize: 10, color: StillTheme.faint)),
         ],
       ),
     );
   }
 
-  /// Long-press actions: open / edit / remove. Removal asks first when the
-  /// setting is on — the remote keeps running either way.
+  /// Long-press / overflow / secondary-click actions: open / edit /
+  /// remove. Removal asks first when the setting is on. Removing closes
+  /// the connection and deletes the local handle; the remote runtime
+  /// itself is untouched but can no longer be reattached from here.
   Future<void> _cardActions(StillSession s) async {
-    final action = await showModalBottomSheet<String>(
-      context: context,
-      backgroundColor: StillTheme.cardBottom,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (context) => SafeArea(
+    final action = await showStillSheet<String>(
+      context,
+      (context) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -414,7 +567,7 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
     if (!mounted || action == null) return;
     switch (action) {
       case 'open':
-        widget.onOpen(s);
+        _openCard(s);
         break;
       case 'edit':
         await showSessionForm(context, widget.manager, initial: s);
@@ -450,7 +603,7 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
           title: Text('Remove session?',
               style: StillTheme.serifTitle.copyWith(fontSize: 20)),
           content: Text(
-              '“${s.name}” leaves the workspace. The remote keeps running and can be reattached from a new session.',
+              '“${s.name}” leaves the workspace and its connection closes. The remote runtime may keep running, but removing deletes this local handle — it can’t be reattached afterwards.',
               style: StillTheme.sans
                   .copyWith(fontSize: 13, color: StillTheme.dim)),
           actions: [

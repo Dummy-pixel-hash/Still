@@ -50,6 +50,11 @@ class SessionManager extends ChangeNotifier {
   final CredentialStore _credentials;
   final SshConnectionFactory _sshFactory;
 
+  /// Bound for transport teardown. Overridable in tests so the hung-
+  /// transport regression test does not wait out the production value.
+  @visibleForTesting
+  Duration disconnectTimeout = const Duration(seconds: 8);
+
   /// Saved SSH identities (names here, secrets in secure storage).
   final SshKeyStore keys;
 
@@ -132,7 +137,20 @@ class SessionManager extends ChangeNotifier {
     await _prefs.saveSessions(_sessions.map((s) => s.toJson()).toList());
   }
 
+  /// Explicit port validation for the state layer. The form validates
+  /// first; this backstop throws so programmatic misuse can never store
+  /// or dial a coerced port.
+  void _requireValidPort(int port) {
+    if (port <= 0 || port >= 65536) {
+      throw ArgumentError.value(
+          port, 'port', 'Must be a number 1–65535.');
+    }
+  }
+
   /// Create a session (metadata only — no connection yet).
+  ///
+  /// Ports are validated explicitly: out-of-range values throw instead of
+  /// being coerced, so a bad port can never slip silently into storage.
   Future<StillSession> create({
     required String name,
     required String host,
@@ -144,6 +162,7 @@ class SessionManager extends ChangeNotifier {
     String project = '',
     String? keyId,
   }) async {
+    _requireValidPort(port);
     final session = StillSession(
       id: 's-${DateTime.now().microsecondsSinceEpoch}-${_idCounter++}',
       name: name.trim().isEmpty ? 'Session' : name.trim(),
@@ -165,6 +184,9 @@ class SessionManager extends ChangeNotifier {
   /// Edit a session. Only metadata changes — `id` and `tmuxSession` are
   /// final on the model, so renames and reconfiguration can never change
   /// the underlying runtime identity.
+  ///
+  /// An out-of-range port throws instead of being silently ignored, so
+  /// callers must handle it rather than assuming the edit applied.
   Future<void> update(
     String id, {
     String? name,
@@ -182,7 +204,10 @@ class SessionManager extends ChangeNotifier {
       s.name = name.trim().isEmpty ? s.name : name.trim();
     }
     if (host != null && host.trim().isNotEmpty) s.host = host.trim();
-    if (port != null && port > 0 && port < 65536) s.port = port;
+    if (port != null) {
+      _requireValidPort(port);
+      s.port = port;
+    }
     if (username != null && username.trim().isNotEmpty) {
       s.username = username.trim();
     }
@@ -202,6 +227,7 @@ class SessionManager extends ChangeNotifier {
     await disconnect(id);
     final runtime = _open.remove(id);
     await runtime?.statusSub?.cancel();
+    if (runtime != null) runtime.statusSub = null;
     runtime?.controller.dispose();
     runtime?.backend.dispose();
     _sessions.removeWhere((s) => s.id == id);
@@ -273,7 +299,7 @@ class SessionManager extends ChangeNotifier {
     notifyListeners();
   }
 
-  SshConfig _configFor(StillSession s, {String? secret}) {
+  Future<SshConfig> _configFor(StillSession s, {String? secret}) async {
     final secretValue = secret ??
         _memorySecrets[s.id] ??
         ''; // resolved from CredentialStore by caller when needed
@@ -282,6 +308,14 @@ class SessionManager extends ChangeNotifier {
     // the first tmux frame is drawn at attach size — stale defaults here
     // mean a visibly wrong first frame and a tmux redraw on every open.
     final runtime = _open[s.id];
+    // Saved-key passphrases resolve from secure storage alongside the
+    // PEM; one-off pasted keys carry no passphrase. Empty resolves to
+    // null so the transport sees "no passphrase", never "".
+    String? passphrase;
+    if (s.authKind == SshAuthKind.privateKey) {
+      passphrase = await _keyPassphraseFor(s);
+      if (passphrase != null && passphrase.isEmpty) passphrase = null;
+    }
     return SshConfig(
       host: s.host,
       port: s.port,
@@ -290,11 +324,34 @@ class SessionManager extends ChangeNotifier {
       password: s.authKind == SshAuthKind.password ? secretValue : null,
       privateKeyPem:
           s.authKind == SshAuthKind.privateKey ? secretValue : null,
+      privateKeyPassphrase: passphrase,
+      workdir: s.workdir,
+      startCommand: startCommandFor(s.kind) ?? '',
       tmuxSession: s.tmuxSession,
       cols: runtime?.backend.cols ?? 80,
       rows: runtime?.backend.rows ?? 24,
-      acceptAnyHostKey: true, // spike behavior, unchanged this milestone
+      // Accept-any host key, disclosed on-screen in the New Session form
+      // and the terminal overlay. known_hosts/TOFU is deferred — see the
+      // SshConfig field docs.
+      acceptAnyHostKey: true,
     );
+  }
+
+  /// Build the connection config and refuse to dial when it cannot
+  /// succeed (empty host/username, out-of-range port, key auth with no
+  /// key). The failure is reported in place with honest copy — the
+  /// transport is never opened for a broken attempt.
+  Future<SshConfig> _checkedConfig(StillSession s) async {
+    final config = await _configFor(s);
+    if (!config.isValid) {
+      final message = invalidSessionConfigMessage();
+      _errors[s.id] = message;
+      _connections[s.id] = TransportState.error;
+      _runtimes[s.id] = RuntimeState.error;
+      notifyListeners();
+      throw StateError(message);
+    }
+    return config;
   }
 
   /// Connect (or re-attach) a session's persistent runtime. `secret` is the
@@ -312,14 +369,16 @@ class SessionManager extends ChangeNotifier {
     }
     _errors[s.id] = null;
     try {
-      await runtime.controller.connect(_configFor(s));
+      await runtime.controller.connect(await _checkedConfig(s));
       s.lastActiveAt = DateTime.now();
       if (remember && (resolved ?? '').isNotEmpty) {
         await _storeSecret(s, resolved!);
       }
       await _persist();
     } catch (e) {
-      _errors[s.id] = friendlyConnectionError(e);
+      // A validity refusal already recorded its own message above; any
+      // other failure maps to the friendly transport copy.
+      _errors[s.id] ??= friendlyConnectionError(e);
       _connections[s.id] = TransportState.error;
       _runtimes[s.id] = RuntimeState.error;
       notifyListeners();
@@ -327,7 +386,35 @@ class SessionManager extends ChangeNotifier {
     }
   }
 
+  /// True when a usable secret (password or key PEM) can be resolved for
+  /// this session without connecting: in-memory, from the session's saved
+  /// key, or from secure storage. The UI uses this to avoid firing connect
+  /// attempts with an empty secret — the New Session form stages an
+  /// explicit secret; auto-connect only runs when this is true.
+  Future<bool> hasUsableSecret(StillSession s) async {
+    if ((_memorySecrets[s.id] ?? '').isNotEmpty) return true;
+    final pem = await _keyPemFor(s);
+    if (pem != null && pem.isNotEmpty) return true;
+    final stored = await _readStoredSecret(s);
+    return stored != null && stored.isNotEmpty;
+  }
+
+  /// Stage the secret the user just entered in the New Session form so the
+  /// terminal can connect immediately, without dialing from the form.
+  ///
+  /// The secret always lives in memory for this run; it is written to
+  /// secure storage only when [remember] is set. It is never written to
+  /// [PrefsStore] or logged. Empty secrets are ignored so a form that
+  /// somehow skips validation can never seed an unusable connect.
+  Future<void> stageSecret(StillSession s, String secret,
+      {bool remember = false}) async {
+    if (secret.isEmpty) return;
+    _memorySecrets[s.id] = secret;
+    if (remember) await _storeSecret(s, secret);
+  }
+
   /// Disconnect transport only — the remote runtime keeps running (tmux).
+  /// Bounded: a hung transport cannot wedge Remove/Disconnect forever.
   Future<void> disconnect(String id) async {
     final runtime = _open[id];
     if (runtime == null) {
@@ -335,7 +422,18 @@ class SessionManager extends ChangeNotifier {
       notifyListeners();
       return;
     }
-    await runtime.controller.disconnect();
+    try {
+      await runtime.controller
+          .disconnect()
+          .timeout(disconnectTimeout);
+    } on TimeoutException {
+      // Transport teardown hung (dead socket): report ourselves
+      // disconnected now instead of leaving the card stuck on the
+      // pre-disconnect state. The controller's eventual completion
+      // re-emits the same state idempotently via its status stream.
+      _connections[id] = TransportState.disconnected;
+      notifyListeners();
+    }
   }
 
   /// Re-attach to the same persistent runtime over a fresh channel.
@@ -353,14 +451,14 @@ class SessionManager extends ChangeNotifier {
           await _readStoredSecret(session);
       if (secret != null && secret.isNotEmpty) {
         _memorySecrets[id] = secret;
-        await runtime.controller.connect(_configFor(session));
+        await runtime.controller.connect(await _checkedConfig(session));
       } else {
         await runtime.controller.reconnect();
       }
       session.lastActiveAt = DateTime.now();
       await _persist();
     } catch (e) {
-      _errors[id] = friendlyConnectionError(e);
+      _errors[id] ??= friendlyConnectionError(e);
       _connections[id] = TransportState.error;
       notifyListeners();
       rethrow;
@@ -376,6 +474,18 @@ class SessionManager extends ChangeNotifier {
     if (keyId == null || keyId.isEmpty) return null;
     final pem = await keys.pemFor(keyId);
     return (pem == null || pem.isEmpty) ? null : pem;
+  }
+
+  /// Saved-key passphrase from secure storage (never prefs). Null unless
+  /// the session names a key that stored one — one-off pasted keys and
+  /// passphrase-less keys resolve to null, which the transport reads as
+  /// "no passphrase".
+  Future<String?> _keyPassphraseFor(StillSession s) async {
+    if (s.authKind != SshAuthKind.privateKey) return null;
+    final keyId = s.keyId;
+    if (keyId == null || keyId.isEmpty) return null;
+    final passphrase = await keys.passphraseFor(keyId);
+    return (passphrase == null || passphrase.isEmpty) ? null : passphrase;
   }
 
   Future<String?> _readStoredSecret(StillSession s) async {

@@ -4,19 +4,15 @@ import '../session/session_manager.dart';
 import '../settings/app_settings.dart';
 import '../theme/still_theme.dart';
 import 'keys_sheet.dart';
+import 'still_controls.dart';
 
 /// Compact local-only settings. Every row maps to implemented behavior —
 /// see AppSettings. No accounts, no sync, no dashboard.
 Future<void> showSettingsSheet(
     BuildContext context, SessionManager manager) {
-  return showModalBottomSheet(
-    context: context,
-    backgroundColor: StillTheme.cardBottom,
-    shape: const RoundedRectangleBorder(
-      borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-    ),
-    isScrollControlled: true,
-    builder: (context) => _SettingsSheet(manager: manager),
+  return showStillSheet(
+    context,
+    (context) => _SettingsSheet(manager: manager),
   );
 }
 

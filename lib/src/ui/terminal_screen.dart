@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:xterm/xterm.dart';
 
+import '../config/ssh_config.dart';
 import '../session/connection_errors.dart';
 import '../session/session_manager.dart';
 import '../session/still_session.dart';
@@ -36,10 +38,16 @@ class _TerminalScreenState extends State<TerminalScreen> {
   bool _chrome = true;
   Timer? _hideTimer;
   String? _localError;
+  // Hoisted: building a fresh Listenable.merge on every build would
+  // resubscribe the AnimatedBuilder each frame. Keys are included so
+  // the auth overlay reflects saved-key removals while open.
+  late final Listenable _repaint;
 
   @override
   void initState() {
     super.initState();
+    _repaint =
+        Listenable.merge([widget.manager, widget.manager.keys]);
     widget.manager.open(widget.session.id);
     _maybeAutoConnect();
   }
@@ -51,12 +59,19 @@ class _TerminalScreenState extends State<TerminalScreen> {
     super.dispose();
   }
 
-  /// If a secret is already known (memory or secure storage), connect
-  /// straight away so opening a card lands in a live terminal.
+  /// If a usable secret is already known (memory, saved key, or secure
+  /// storage), connect straight away so opening a card lands in a live
+  /// terminal. Never dial with an empty secret: when nothing is
+  /// resolvable we stay on the calm auth overlay instead of producing a
+  /// generic connection failure.
   Future<void> _maybeAutoConnect() async {
     if (widget.manager.connectionOf(widget.session.id) ==
         TransportState.connected) {
       _scheduleHide();
+      return;
+    }
+    if (!await widget.manager.hasUsableSecret(widget.session)) {
+      if (mounted) setState(() => _busy = false);
       return;
     }
     // Try stored-secret connect without prompting.
@@ -64,7 +79,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
     try {
       await widget.manager.connect(widget.session);
     } catch (_) {
-      // No stored secret or unreachable: fall through to the auth overlay.
+      // Unreachable or stale secret: fall through to the auth overlay.
       // Error text surfaces via manager.errorOf + local state stays calm.
     } finally {
       if (mounted) {
@@ -90,6 +105,19 @@ class _TerminalScreenState extends State<TerminalScreen> {
   }
 
   Future<void> _connect() async {
+    // Never dial with an empty secret. If nothing is stored and the field
+    // is empty, stay on the auth overlay with copy that says what is
+    // needed instead of surfacing a raw transport failure.
+    if (_secret.text.isEmpty &&
+        !await widget.manager.hasUsableSecret(widget.session)) {
+      if (mounted) {
+        setState(() {
+          _localError = authMissingMessage(widget.session.authKind);
+          _busy = false;
+        });
+      }
+      return;
+    }
     setState(() {
       _busy = true;
       _localError = null;
@@ -97,11 +125,15 @@ class _TerminalScreenState extends State<TerminalScreen> {
     try {
       await widget.manager.connect(
         widget.session,
-        secret: _secret.text,
+        // Empty field means "use whatever is stored" — passing '' would
+        // override the remembered secret with an empty one.
+        secret: _secret.text.isEmpty ? null : _secret.text,
         remember: _remember,
       );
+      if (!mounted) return;
       _secret.clear();
     } catch (e) {
+      if (!mounted) return;
       setState(() => _localError = friendlyConnectionError(e));
     } finally {
       if (mounted) {
@@ -112,6 +144,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
   }
 
   Future<void> _reconnect() async {
+    if (!mounted) return;
     setState(() {
       _busy = true;
       _localError = null;
@@ -119,12 +152,25 @@ class _TerminalScreenState extends State<TerminalScreen> {
     try {
       await widget.manager.reconnect(widget.session.id);
     } catch (e) {
+      if (!mounted) return;
       setState(() => _localError = friendlyConnectionError(e));
     } finally {
       if (mounted) {
         setState(() => _busy = false);
         _scheduleHide();
       }
+    }
+  }
+
+  /// Close the SSH transport, leaving the remote persistent runtime
+  /// intact. Distinct from going back to the workspace, which leaves the
+  /// connection open. The session card stays; reopening reattaches.
+  Future<void> _disconnect() async {
+    try {
+      await widget.manager.disconnect(widget.session.id);
+    } catch (_) {
+      // Best-effort teardown: the overlay below already reflects
+      // whatever transport state the manager reports.
     }
   }
 
@@ -148,7 +194,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
         child: Focus(
           autofocus: true,
           child: AnimatedBuilder(
-            animation: widget.manager,
+            animation: _repaint,
             builder: (context, _) {
               final conn =
                   widget.manager.connectionOf(session.id);
@@ -225,6 +271,9 @@ class _TerminalScreenState extends State<TerminalScreen> {
 
   Widget _chromePill(
       StillSession session, TransportState conn, bool live) {
+    // Desktop-only hints (host, Ctrl .) collapse on narrow/touch
+    // layouts, where the pill keeps name + status + actions.
+    final wide = MediaQuery.sizeOf(context).width >= 600;
     return AnimatedPositioned(
       duration: const Duration(milliseconds: 400),
       curve: Curves.easeOutCubic,
@@ -237,65 +286,120 @@ class _TerminalScreenState extends State<TerminalScreen> {
         child: AnimatedOpacity(
           duration: const Duration(milliseconds: 300),
           opacity: _chrome ? 1 : 0,
-          child: Container(
-            padding: const EdgeInsets.only(left: 16, right: 6, top: 6, bottom: 6),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(24),
-              color: StillTheme.chrome.withAlpha(220),
-              border: Border.all(color: Colors.white.withAlpha(23)),
-              boxShadow: const [
-                BoxShadow(
-                    color: Color.fromRGBO(0, 0, 0, 0.7),
-                    blurRadius: 40,
-                    offset: Offset(0, 16)),
-              ],
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Text('›_',
-                    style: TextStyle(
-                        fontFamily: 'monospace', color: StillTheme.dim)),
-                const SizedBox(width: 8),
-                Flexible(
-                  child: Text(session.name,
-                      overflow: TextOverflow.ellipsis,
-                      style: StillTheme.sans.copyWith(
-                          fontSize: 12, fontWeight: FontWeight.w500)),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(24),
+            child: BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+              child: Container(
+                padding: const EdgeInsets.only(
+                    left: 16, right: 6, top: 6, bottom: 6),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(24),
+                  color: StillTheme.chrome.withAlpha(204),
+                  border:
+                      Border.all(color: Colors.white.withAlpha(23)),
+                  boxShadow: const [
+                    BoxShadow(
+                        color: Color.fromRGBO(0, 0, 0, 0.7),
+                        blurRadius: 40,
+                        offset: Offset(0, 16)),
+                  ],
                 ),
-                const SizedBox(width: 8),
-                Text(session.host,
-                    style: StillTheme.mono
-                        .copyWith(fontSize: 11, color: StillTheme.dim)),
-                const SizedBox(width: 4),
-                _statusDot(conn),
-                const SizedBox(width: 8),
-                GestureDetector(
-                  onTap: widget.onBack,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 12, vertical: 7),
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(18),
-                      color: Colors.white.withAlpha(18),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text('›_',
+                        style: TextStyle(
+                            fontFamily: 'monospace',
+                            color: StillTheme.dim)),
+                    const SizedBox(width: 8),
+                    Flexible(
+                      child: Text(session.name,
+                          overflow: TextOverflow.ellipsis,
+                          style: StillTheme.sans.copyWith(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w500)),
                     ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Text('Workspace',
-                            style: TextStyle(
-                                fontSize: 12, color: StillTheme.fg)),
-                        const SizedBox(width: 8),
-                        Text(!live ? '' : 'Ctrl .',
-                            style: const TextStyle(
-                                fontFamily: 'monospace',
-                                fontSize: 10,
-                                color: StillTheme.faint)),
-                      ],
+                    if (wide) ...[
+                      const SizedBox(width: 8),
+                      Text(session.host,
+                          style: StillTheme.mono.copyWith(
+                              fontSize: 11, color: StillTheme.dim)),
+                    ],
+                    const SizedBox(width: 8),
+                    _statusDot(conn),
+                    const SizedBox(width: 4),
+                    // Disconnect is transport teardown (remote keeps
+                    // running); Workspace just goes back and leaves the
+                    // connection open. Shown only while live so the two
+                    // never read as one action.
+                    if (live) ...[
+                      Tooltip(
+                        message:
+                            'Disconnect — closes the connection. The remote session keeps running.',
+                        child: InkWell(
+                          key: const ValueKey('terminal-disconnect'),
+                          onTap: _disconnect,
+                          borderRadius: BorderRadius.circular(18),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 7),
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(18),
+                              border: Border.all(
+                                  color:
+                                      Colors.white.withAlpha(30)),
+                            ),
+                            child: const Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.link_off,
+                                    size: 14,
+                                    color: StillTheme.dim),
+                                SizedBox(width: 6),
+                                Text('Disconnect',
+                                    style: TextStyle(
+                                        fontSize: 12,
+                                        color: StillTheme.dim)),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 4),
+                    ],
+                    GestureDetector(
+                      onTap: widget.onBack,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 7),
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(18),
+                          color: Colors.white.withAlpha(18),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Text('Workspace',
+                                style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w500,
+                                    color: StillTheme.fg)),
+                            if (wide && live) ...[
+                              const SizedBox(width: 8),
+                              const Text('Ctrl .',
+                                  style: TextStyle(
+                                      fontFamily: 'monospace',
+                                      fontSize: 10,
+                                      color: StillTheme.faint)),
+                            ],
+                          ],
+                        ),
+                      ),
                     ),
-                  ),
+                  ],
                 ),
-              ],
+              ),
             ),
           ),
         ),
@@ -349,6 +453,11 @@ class _TerminalScreenState extends State<TerminalScreen> {
         widget.manager.errorOf(session.id) ?? _localError;
     final needsSecret = conn != TransportState.connecting &&
         widget.manager.runtimeOf(session.id) != RuntimeState.ready;
+    // A named saved key that no longer exists is shown explicitly: the
+    // pasted-key field below is the way back in, not a silent retry.
+    final danglingKey = session.authKind == SshAuthKind.privateKey &&
+        (session.keyId?.isNotEmpty ?? false) &&
+        widget.manager.keys.byId(session.keyId) == null;
 
     return Positioned.fill(
       child: Container(
@@ -388,8 +497,23 @@ class _TerminalScreenState extends State<TerminalScreen> {
                                 fontSize: 13, color: StillTheme.dim)),
                       ],
                     )
-                  else if (needsSecret)
+                  else if (needsSecret) ...[
+                    if (danglingKey) ...[
+                      const Text(
+                        'That saved key is gone — paste a key below or pick another in the session form.',
+                        style: TextStyle(
+                            fontSize: 11, color: StillTheme.redSoft),
+                      ),
+                      const SizedBox(height: 8),
+                    ],
                     ..._authFields(session),
+                    if (storedError == null) ...[
+                      const SizedBox(height: 8),
+                      Text(authMissingMessage(session.authKind),
+                          style: const TextStyle(
+                              fontSize: 11, color: StillTheme.faint)),
+                    ],
+                  ],
                   if (storedError != null && !_busy) ...[
                     const SizedBox(height: 12),
                     Text(storedError,
@@ -442,7 +566,13 @@ class _TerminalScreenState extends State<TerminalScreen> {
                   ),
                   const SizedBox(height: 10),
                   const Text(
-                    'Disconnecting never stops the remote session — it keeps running and reattaches here.',
+                    'Going back to the workspace leaves the connection open. Disconnect closes it — either way the remote runtime keeps running, and you can reattach here.',
+                    style:
+                        TextStyle(fontSize: 10, color: StillTheme.faint),
+                  ),
+                  const SizedBox(height: 6),
+                  const Text(
+                    'Host identity isn’t verified — any host key is accepted on connect.',
                     style:
                         TextStyle(fontSize: 10, color: StillTheme.faint),
                   ),
@@ -456,13 +586,15 @@ class _TerminalScreenState extends State<TerminalScreen> {
   }
 
   List<Widget> _authFields(StillSession session) {
-    final isKey = session.authKind.name == 'privateKey';
+    final isKey = session.authKind == SshAuthKind.privateKey;
     return [
       TextField(
         controller: _secret,
         obscureText: !isKey,
         maxLines: isKey ? 4 : 1,
         minLines: isKey ? 3 : 1,
+        autocorrect: false,
+        enableSuggestions: false,
         onSubmitted: (_) => _connect(),
         style: StillTheme.sans.copyWith(
             fontSize: 13,
@@ -497,7 +629,9 @@ class _TerminalScreenState extends State<TerminalScreen> {
   Future<void> _reconnectOrConnect() async {
     // Detached sessions prefer secret-based connect (fresh channel +
     // explicit tmux attach); pure reattach is the fallback inside
-    // SessionManager.reconnect when no secret is known.
+    // SessionManager.reconnect when no secret is known. First-time
+    // creation never reaches this path — the New Session form resolves
+    // auth before opening the terminal.
     if (_secret.text.isNotEmpty) {
       return _connect();
     }

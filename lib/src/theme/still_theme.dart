@@ -151,12 +151,21 @@ abstract class StillTheme {
       ),
       // Still surfaces for framework chrome: dialogs, menus, toggles.
       // Individual product controls keep their own explicit styling.
-      dialogTheme: const DialogTheme(
-        backgroundColor: cardBottom,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.all(Radius.circular(cardRadius)),
-        ),
-      ),
+      //
+      // Derived from ThemeData's own dialog theme instead of a named
+      // `const DialogTheme(...)`: Flutter 3.44.9 renamed the data class to
+      // `DialogThemeData` (the old `DialogTheme` name became an
+      // InheritedTheme widget, so it is no longer assignable here), while
+      // the pinned 3.24.5 SDK still ships only `DialogTheme`. Sourcing the
+      // receiver from `ThemeData` lets the type be inferred per SDK, so the
+      // same line compiles on both and the styling below is byte-identical
+      // (same background color, same card radius) on both.
+      dialogTheme: ThemeData.light().dialogTheme.copyWith(
+            backgroundColor: cardBottom,
+            shape: const RoundedRectangleBorder(
+              borderRadius: BorderRadius.all(Radius.circular(cardRadius)),
+            ),
+          ),
       popupMenuTheme: PopupMenuThemeData(
         color: chrome,
         shape: RoundedRectangleBorder(
